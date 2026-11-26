@@ -1,0 +1,66 @@
+name: Build 本地阅读 APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build unsigned APK
+        run: |
+          set -e
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          if [ ! -f "$ANDROID_JAR" ]; then ANDROID_JAR=$(ls "$ANDROID_HOME"/platforms/android-*/android.jar | sort -V | tail -1); fi
+          echo "build-tools=$BUILD_TOOLS  android.jar=$ANDROID_JAR"
+          rm -rf build && mkdir -p build/classes build/dex build/gen
+          "$BUILD_TOOLS/aapt2" link --manifest AndroidManifest.xml -I "$ANDROID_JAR" \
+            -o build/base.apk --java build/gen --min-sdk-version 24 --target-sdk-version 35
+          javac --release 11 -encoding UTF-8 -cp "$ANDROID_JAR" -d build/classes \
+            $(find java -name '*.java') $(find build/gen -name '*.java')
+          "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 24 --output build/dex \
+            $(find build/classes -name '*.class')
+          (cd build/dex && zip -q -u ../base.apk classes.dex)
+          "$BUILD_TOOLS/zipalign" -f 4 build/base.apk build/LocalReader-unsigned.apk
+
+      - name: Sign APK
+        run: |
+          set -e
+          BUILD_TOOLS=$(ls -d /usr/local/lib/android/sdk/build-tools/* | sort -V | tail -1)
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks reader-release.p12 --ks-type PKCS12 \
+            --ks-pass pass:localreader2026 --key-pass pass:localreader2026 \
+            --ks-key-alias reader --v1-signing-enabled true --v2-signing-enabled true \
+            --out build/LocalReader-v1.0.apk build/LocalReader-unsigned.apk
+          "$BUILD_TOOLS/apksigner" verify --print-certs build/LocalReader-v1.0.apk
+          ls -lh build/LocalReader-v1.0.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalReader-APK
+          path: build/LocalReader-v1.0.apk
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v1.0 build/LocalReader-v1.0.apk \
+            --title "本地阅读 v1.0" \
+            --notes "纯本地 TXT/EPUB 阅读器：书架、章节目录、书签、字号/行距/主题、进度保存。" \
+          || gh release upload v1.0 build/LocalReader-v1.0.apk --clobber
